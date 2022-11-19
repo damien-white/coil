@@ -1,0 +1,11 @@
+# Cargo configuration
+# For instructions pertaining to dependencies and other requirements, see:
+# https://rentry.co/a72b034a502e0309ee586058d867b17dd18037b38c4df82b232fdd7655679007
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "linker=clang", "-C", "link-arg=-fuse-ld=lld"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-fuse-ld=/usr/local/bin/zld"]
