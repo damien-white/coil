@@ -81,17 +81,20 @@ cargo install --force cargo-binutils
 rustup component add llvm-tools-preview
 ```
 
-### MacOS
+##### MacOS
 - [zld linker][zld]
+
+Install the required linker:
 ```shell
 brew install michaeleisel/zld/zld
 ```
 
-### Linux
+##### Linux
 - [lld linker][lld-linker]
 - [Clang compiler frontend][clang]
+Install the linker and compiler frontend:
 ```shell
-sudo apt-get install lld clang -yq
+sudo apt-get install lld clang
 ```
 
 ## License
