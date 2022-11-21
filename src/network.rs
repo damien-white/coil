@@ -12,7 +12,7 @@ use libp2p::{
 };
 use tokio::io::{self, AsyncBufReadExt};
 
-// FIXME: Refactor `Controller` impl due to potential circular depenencies and invalid/initialized state.
+// FIXME: Refactor `Controller` to avoid circular depenencies or invalid/initialized state.
 
 /// NetworkBehaviour for multicast DNS using the Tokio runtime. Peers on the
 /// local network are automatically discovered and added to the topology.
@@ -113,36 +113,6 @@ impl Controller {
     pub fn listen_on(&mut self, addr: Multiaddr) -> Result<(), Report> {
         Ok(self.swarm.listen_on(addr).map(|_| {})?)
     }
-
-    // /// Returns the Peer ID of the [`Controller`] node, derived from its keypair.
-    // fn peer_id(&self) -> PeerId {
-    //     self.keypair.public().to_peer_id()
-    // }
-
-    // /// Subscribes to a `Topic` and adds it to the controller's internal state.
-    // ///
-    // /// Returns `Ok` if the subscription works, or an `Err` if the controller is
-    // /// already subscribed to the topic.
-    // pub fn subscribe(&mut self, topic: &str) -> Result<(), Report> {
-    //     if self
-    //         .swarm
-    //         .behaviour_mut()
-    //         .protocol
-    //         .subscribe(Topic::new(topic))
-    //     {
-    //         Ok(())
-    //     } else {
-    //         Err(eyre!("controller is already subscribed to {topic}"))
-    //     }
-    // }
-
-    // /// Publishes a message to the network, if we're subscribed to the topic only.
-    // pub fn publish(&mut self, topic: &str, message: &[u8]) {
-    //     self.swarm
-    //         .behaviour_mut()
-    //         .protocol
-    //         .publish(Topic::new(topic), message)
-    // }
 
     /// Start the main event loop, handling peers and swarm events.
     pub async fn run(&mut self, pubsub_topic: Topic) -> Result<(), Report> {
