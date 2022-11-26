@@ -8,7 +8,6 @@ use std::{
 use color_eyre::{eyre::eyre, Report};
 use futures::prelude::stream::StreamExt;
 use libp2p::{
-    self,
     core::{muxing::StreamMuxerBox, transport, upgrade},
     gossipsub::{
         Gossipsub, GossipsubConfigBuilder, GossipsubEvent, GossipsubMessage, IdentTopic,
@@ -43,7 +42,10 @@ pub struct ControllerBehaviour {
 }
 
 impl ControllerBehaviour {
-    fn new(node: &Node, mdns: MdnsBehaviour) -> Result<ControllerBehaviour, Report> {
+    fn new(
+        id_keys: &identity::Keypair,
+        mdns: MdnsBehaviour,
+    ) -> Result<ControllerBehaviour, Report> {
         // The content of each message is hashed, yielding the message ID.
         let message_id_fn = |message: &GossipsubMessage| {
             let mut hasher = DefaultHasher::new();
@@ -52,7 +54,7 @@ impl ControllerBehaviour {
         };
 
         // Enable message signing. Use owner of key for author and random sequence number.
-        let privacy = MessageAuthenticity::Signed(node.keypair().clone());
+        let privacy = MessageAuthenticity::Signed(id_keys.clone());
         let config = GossipsubConfigBuilder::default()
             .heartbeat_interval(Duration::from_millis(1053)) // Increase to aid with debugging by decreasing noise
             .validation_mode(ValidationMode::Strict) // Set message validation (default: Strict)
@@ -90,7 +92,7 @@ impl From<GossipsubEvent> for ControllerEvent {
 ///  almost exactly the same as a `Swarm` instance.
 pub struct Controller {
     swarm: Swarm<ControllerBehaviour>,
-    keypair: identity::Keypair,
+    id_keys: identity::Keypair,
 }
 
 impl Controller {
@@ -98,14 +100,11 @@ impl Controller {
     pub fn new(
         transport: transport::Boxed<(PeerId, StreamMuxerBox)>,
         behaviour: ControllerBehaviour,
-        node: Node,
+        id_keys: identity::Keypair,
     ) -> Controller {
-        let swarm = Swarm::with_tokio_executor(transport, behaviour, node.peer_id());
+        let swarm = Swarm::with_tokio_executor(transport, behaviour, id_keys.public().to_peer_id());
         tracing::info!("initializing controller node");
-        Controller {
-            swarm,
-            keypair: node.keypair().clone(),
-        }
+        Controller { swarm, id_keys }
     }
 
     /// Returns a refernce to the controller's Swarm instance.
@@ -114,7 +113,7 @@ impl Controller {
     }
 
     pub fn public_key(&self) -> identity::PublicKey {
-        self.keypair.public()
+        self.id_keys.public()
     }
 
     /// Returns a reference to the provided [`NetworkBehaviour`].
@@ -128,10 +127,13 @@ impl Controller {
     }
 
     /// Dial a known or unknown peer.
-    pub fn dial_peer(&mut self, peer_addr: &str) -> Result<(), Report> {
-        let multiaddr = peer_addr.parse::<Multiaddr>()?;
-        self.swarm.dial(multiaddr)?;
-        tracing::info!("Dialed peer {peer_addr}");
+    pub fn dial_peer(&mut self, address: &str) -> Result<(), Report> {
+        let multiaddr = address.parse::<Multiaddr>()?;
+        match self.swarm.dial(multiaddr.clone()) {
+            Ok(_) => tracing::info!("Dialed peer {multiaddr}"),
+            Err(err) => tracing::error!("Dialed {multiaddr}, but failed: {err:?}"),
+        }
+
         Ok(())
     }
 
@@ -209,32 +211,6 @@ impl DerefMut for Controller {
     }
 }
 
-/// A [Node] is a member of the peer-to-peer network.
-pub struct Node(identity::Keypair);
-
-impl Node {
-    /// Create a new instance of a [Node], generating its cryptographic keypair.
-    pub fn init() -> Self {
-        Self::default()
-    }
-
-    /// Returns the Peer ID of the [`Controller`] node, derived from its keypair.
-    pub fn keypair(&self) -> &identity::Keypair {
-        &self.0
-    }
-
-    /// Return the peer's ID.
-    pub fn peer_id(&self) -> PeerId {
-        self.0.public().to_peer_id()
-    }
-}
-
-impl Default for Node {
-    fn default() -> Self {
-        Self(identity::Keypair::generate_ed25519())
-    }
-}
-
 /// Hard-coded string representing the topic to be used for pubsub.
 pub const PUBSUB_TOPIC: &str = "coil-05FjJDr9Y8z";
 
@@ -243,22 +219,22 @@ pub const PUBSUB_TOPIC: &str = "coil-05FjJDr9Y8z";
 ///
 /// [Swarm]: https://docs.rs/libp2p/latest/libp2p/struct.Swarm.html
 pub async fn bootstrap() -> Result<(), Report> {
-    let node = Node::init();
+    // let node = Node::init();
+    let id_keys = identity::Keypair::generate_ed25519();
 
-    // TODO: Learn more about the transport setup process, then refactor if needed.
     let transport_config = tcp::Config::default().nodelay(true);
     let transport = tcp::tokio::Transport::new(transport_config)
         .upgrade(upgrade::Version::V1)
-        .authenticate(noise::NoiseAuthenticated::xx(node.keypair())?)
+        .authenticate(noise::NoiseAuthenticated::xx(&id_keys)?)
         .multiplex(mplex::MplexConfig::new())
         .boxed();
 
     let pubsub_topic = IdentTopic::new(PUBSUB_TOPIC);
 
     let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default())?;
-    let behaviour = ControllerBehaviour::new(&node, mdns_behaviour)?;
+    let behaviour = ControllerBehaviour::new(&id_keys, mdns_behaviour)?;
 
-    let mut controller = Controller::new(transport, behaviour, node);
+    let mut controller = Controller::new(transport, behaviour, id_keys);
     match controller
         .swarm
         .behaviour_mut()
@@ -269,12 +245,13 @@ pub async fn bootstrap() -> Result<(), Report> {
         Err(err) => tracing::error!("Subscription to topic {pubsub_topic} failed: {err:?}"),
     }
 
+    let listen_addr = "/ip4/0.0.0.0/tcp/0".parse::<Multiaddr>()?;
+    controller.listen_on(listen_addr)?;
+
     // Reach out to another node if specified
-    if let Some(ref to_dial) = std::env::args().nth(1) {
-        controller.dial_peer(to_dial)?;
+    if let Some(ref multiaddr) = std::env::args().nth(1) {
+        controller.dial_peer(multiaddr)?;
     }
 
-    let listen_addr = "/ip4/0.0.0.0/tcp/15550".parse::<Multiaddr>()?;
-    controller.listen_on(listen_addr)?;
     controller.run(pubsub_topic.clone()).await
 }
