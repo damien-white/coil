@@ -16,6 +16,7 @@ pub fn attach_tracing_logger() -> Result<(), Report> {
     let tracing_filter = EnvFilter::from_default_env().add_directive(filtering_directive);
     tracing_subscriber::fmt()
         .with_env_filter(tracing_filter)
+        .with_ansi(true)
         .with_span_events(FmtSpan::FULL)
         .init();
 

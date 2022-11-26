@@ -19,11 +19,20 @@
 </div>
 
 ## Description
-`coil-service` is a cross-platform, distributed messaging service that uses a peer-to-peer model to facilitate reliable communications. It offers useful abstractions over low-level networking, providing a foundation for distributed applications.
 
-## Status
+`coil-service` is a cross-platform, distributed messaging service that uses a peer-to-peer model to facilitate reliable communications. It offers abstractions over low-level networking components provided by [`libp2p`][libp2p] and [`tokio`][tokio]. 
 
-`coil-service` is **absolutely not** production ready and is still considered to be "**proof of concept**" status. Do not, under any circumstances, use this software in a production environment. 
+`coil-service` is free, open-source software and may be used in your work, according with the [licensing][license]. I hope that you do find a use for it, or that it inspires you to build something amazing. Either way, this project will remain open-source for as long as the project exists.
+
+## Project Status
+
+### Activity 
+
+`coil-service` is under active development.
+
+### Warning
+
+**Do not**, under any circumstances, use this software in a production environment. If you choose to use this software, or any components of it, within your own software, you do so entirely at your own risk.
 
 ## Design decisions
 
@@ -31,18 +40,41 @@
 
 ## Goals
 
-### Cross-platform support
+- Expose intuitive, high-level APIs to allow users to build their own custom networking utilities and protocol stacks
+- Avoid protocol ossification (you will never be forced to use `TCP` or `UDP`, etc.)
+  - Please note, that for IPC, your choices may be limited, based on your target platform
+- Provide cross-platform support for Windows, Linux and MacOS
+  - **NOTE**: Target cpu architecture is assumed to be `x86-64`
+- Create abstractions over [`libp2p`][libp2p] that allow developers to work at a higher-level
+- Provide "escape-hatches" when deemeded necessary, so that developers can fine-tune components for performance, resource efficiency, etc.
+
+### Cross-platform
 Ideally, this service will run on as many devices as possible. This project is being developed by one person (myself), and I will do my best to support as many platforms as possible.
 
-The following targets are guaranteed to be fully supported at all times:
-  - Windows
-    - `x86_64-pc-windows-msvc`
-  - MacOS
-    - `x86_64-apple-darwin`
-  - Linux
-    - `x86_64-unknown-linux-gnu`
-    
-**NOTE**: Support for devices with `aarch64` chip sets (i.e. MacOS M1, Raspberry Pi, etc.) will be added to this list if the work required is deemed feasible. If you would like to help, [contributions][contributing] are welcome.
+I own machines that natively run all three main desktop platforms, but am doing much of the initial development on my
+Windows and Linux machines. If support for MacOS (x86-64, not aarch64) lags behind, or a critical feature is missing, or 
+not working, please open a ticket! I will do my absolute best to keep support for the main desktop platforms in lockstep.
+
+#### Primary Targets:
+These targets will be treated as first-class citizens:
+- Windows: `x86_64-pc-windows-msvc`
+- Linux: `x86_64-unknown-linux-gnu`
+- MacOS: `x86_64-apple-darwin`
+
+#### Secondary Targets
+These targets will ideally be added to the list above, but for the time being, support depends on how much time I have, and how simple it is to add support for these platforms:
+- Raspberry Pi 4: `aarch64-unknown-linux-gnu`
+- MacOS M1: `aarch64-apple-darwin`
+- Windows GNU: `x86_64-pc-windows-gnu`
+  - This target will be moved to "Primary targets" if there are few to no complications.
+- TBA
+
+If you would like to help add support for additional platforms, I would absolutely love your help. Any and all [contributions][contributing] are welcome!
+
+## Non-goals / Anti-goals
+
+- This project has absolutely nothing to do with "blockchain", and it never will.
+- 
 
 ## Project Setup
 
@@ -55,7 +87,7 @@ This software is currently being developed using the Rust `nightly` [toolchain][
 The presence of the `rust-toolchain.toml` file in the root of the project should automatically install the correct toolchain for you upon first build.
 If it does not, you can manually install the toolchain with the following command:
 
-```shell
+```bash
 rustup toolchain install nightly --allow-downgrade --profile default --component cargo clippy llvm-tools-preview rust-src
 ```
 
@@ -71,29 +103,31 @@ This is not permanent, and will change when a PoC and/or MVP is complete. At tha
 Setup instructions for each supported platform can be found in the section below:
 
 ##### Windows
-- [lld linker][lld-linker]
-- [Clang compiler frontend][clang]
-  - These components should already be installed from `MSVC`.
+These tools should be installed already via `Visual Studio Build Tools`. You can also use a package manager, such as [`chocolatey`][chocolatey] or [`scoop`][scoop].
+- [`lld` linker][lld-linker]
+- [`Clang` compiler frontend][clang]
+  - These components should already be installed from `MSVC`
+  - *They may need to be manually added to your PATH variable*
 
 Install the cargo binaries and rustup components:
-```shell
+```bash
 cargo install --force cargo-binutils
 rustup component add llvm-tools-preview
 ```
 
 ##### MacOS
-- [zld linker][zld]
+- [`zld` linker][zld]
 
 Install the required linker:
-```shell
+```bash
 brew install michaeleisel/zld/zld
 ```
 
 ##### Linux
-- [lld linker][lld-linker]
-- [Clang compiler frontend][clang]
+- [`lld` linker][lld-linker]
+- [`Clang` compiler frontend][clang]
 Install the linker and compiler frontend:
-```shell
+```bash
 sudo apt-get install lld clang
 ```
 
@@ -105,14 +139,14 @@ This project is licensed under the [MIT license][license].
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in `coil-service` by you, shall be licensed as MIT, without any additional terms or conditions.
 
-<!-- Links -->
+<!-- Links section -->
 
 <!-- crate docs -->
-[docs]: https://docs.rs/coil-service
+[docs]: https://docs.rs/coil
 <!-- dependencies -->
 [tokio]: https://crates.io/crates/tokio
 [libp2p]: https://crates.io/crates/libp2p
-<!-- Linker -->
+<!-- Linker dependencies -->
 [clang]: https://clang.llvm.org/
 [lld-linker]: https://lld.llvm.org/
 [zld]: https://github.com/michaeleisel/zld
@@ -120,3 +154,6 @@ Unless you explicitly state otherwise, any contribution intentionally submitted 
 [contributing]: ./CONTRIBUTING.md
 [license]: ./LICENSE
 [project-rust-toolchain]: ./rust-toolchain.toml
+<!-- Windows package managers -->
+[chocolatey]: https://chocolatey.org/
+[scoop]: https://scoop.sh/

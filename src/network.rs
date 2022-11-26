@@ -1,16 +1,28 @@
-use std::ops::{Deref, DerefMut};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    ops::{Deref, DerefMut},
+    time::Duration,
+};
 
 use color_eyre::{eyre::eyre, Report};
 use futures::prelude::stream::StreamExt;
 use libp2p::{
     self,
     core::{muxing::StreamMuxerBox, transport, upgrade},
-    floodsub::{self, Floodsub, FloodsubEvent, Topic},
+    gossipsub::{
+        Gossipsub, GossipsubConfigBuilder, GossipsubEvent, GossipsubMessage, IdentTopic,
+        MessageAuthenticity, MessageId, ValidationMode,
+    },
     identity, mdns, mplex, noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, Multiaddr, PeerId, Swarm, Transport,
 };
 use tokio::io::{self, AsyncBufReadExt};
+
+use self::signals::spawn_signal_handler;
+
+pub mod signals;
 
 // FIXME: Refactor `Controller` to avoid circular depenencies or invalid/initialized state.
 
@@ -18,42 +30,58 @@ use tokio::io::{self, AsyncBufReadExt};
 /// local network are automatically discovered and added to the topology.
 pub type MdnsBehaviour = mdns::Behaviour<mdns::tokio::Tokio>;
 
-/// Network behaviour that combines floodsub and mDNS.
+/// Network behaviour that combines Gossipsub and mDNS.
 ///
 /// Floodsub is used for publish / subscribe and mDNS for local peer discovery.
 ///
 /// The derive generates a delegating `NetworkBehaviour` implementation.
 #[derive(NetworkBehaviour)]
-#[behaviour(out_event = "CoilOutEvent")]
+#[behaviour(out_event = "ControllerEvent")]
 pub struct ControllerBehaviour {
-    protocol: Floodsub,
+    gossipsub: Gossipsub,
     mdns: MdnsBehaviour,
 }
+
 impl ControllerBehaviour {
-    fn new(node: &Node, mdns: MdnsBehaviour) -> ControllerBehaviour {
-        ControllerBehaviour {
-            protocol: Floodsub::new(node.peer_id()),
-            mdns,
-        }
+    fn new(node: &Node, mdns: MdnsBehaviour) -> Result<ControllerBehaviour, Report> {
+        // The content of each message is hashed, yielding the message ID.
+        let message_id_fn = |message: &GossipsubMessage| {
+            let mut hasher = DefaultHasher::new();
+            message.data.hash(&mut hasher);
+            MessageId::from(hasher.finish().to_string())
+        };
+
+        // Enable message signing. Use owner of key for author and random sequence number.
+        let privacy = MessageAuthenticity::Signed(node.keypair().clone());
+        let config = GossipsubConfigBuilder::default()
+            .heartbeat_interval(Duration::from_millis(1053)) // Increase to aid with debugging by decreasing noise
+            .validation_mode(ValidationMode::Strict) // Set message validation (default: Strict)
+            .message_id_fn(message_id_fn) // content-address messages. No two messages of the same content will be propagated.
+            .build()
+            .map_err(|err| eyre!(err))?;
+
+        // Build a gossipsub network behaviour from the privacy and config options.
+        let gossipsub = Gossipsub::new(privacy, config).map_err(|err| eyre!(err))?;
+        Ok(ControllerBehaviour { gossipsub, mdns })
     }
 }
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
-pub enum CoilOutEvent {
-    Floodsub(FloodsubEvent),
+pub enum ControllerEvent {
+    Gossipsub(GossipsubEvent),
     Mdns(mdns::Event),
 }
 
-impl From<mdns::Event> for CoilOutEvent {
+impl From<mdns::Event> for ControllerEvent {
     fn from(value: mdns::Event) -> Self {
         Self::Mdns(value)
     }
 }
 
-impl From<FloodsubEvent> for CoilOutEvent {
-    fn from(value: FloodsubEvent) -> Self {
-        Self::Floodsub(value)
+impl From<GossipsubEvent> for ControllerEvent {
+    fn from(value: GossipsubEvent) -> Self {
+        Self::Gossipsub(value)
     }
 }
 
@@ -115,57 +143,52 @@ impl Controller {
     }
 
     /// Start the main event loop, handling peers and swarm events.
-    pub async fn run(&mut self, pubsub_topic: Topic) -> Result<(), Report> {
+    pub async fn run(&mut self, topic: IdentTopic) -> Result<(), Report> {
         let mut stdin = io::BufReader::new(io::stdin()).lines();
 
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to listen for shutdown signal.");
-            tracing::debug!("Received shutdown signal. Exiting gracefully...");
-            std::process::exit(0);
-        });
+        spawn_signal_handler().await;
 
         loop {
             tokio::select! {
                 line = stdin.next_line() => {
                     if let Ok(Some(line)) = line {
-                        self.swarm.behaviour_mut().protocol.publish(pubsub_topic.clone(), line.as_bytes());
+                        match self.swarm.behaviour_mut().gossipsub.publish(topic.clone(), line.as_bytes()) {
+                            Ok(message_id) => tracing::info!("Published message with ID {message_id}"),
+                            Err(err) => tracing::error!("Failed to publish message; error = {err:?}"),
+                        }
                     } else {
                         return Err(eyre!("Stdin handle closed unexpectedly"))
                     }
                 }
-                event = self.select_next_some() => {
-                    match event {
-                        SwarmEvent::NewListenAddr { address, .. } => {
-                            tracing::info!("Listening on {address:?}");
-                        }
-                        SwarmEvent::Behaviour(CoilOutEvent::Floodsub(FloodsubEvent::Message(message))) => {
-                            let message_data = String::from_utf8_lossy(&message.data);
-                            let source_peer = message.source;
-                            tracing::info!("Message received: '{message_data}' from {source_peer}");
-                        }
-                        SwarmEvent::Behaviour(CoilOutEvent::Mdns(event)) => match event {
-                            mdns::Event::Discovered(list) => {
-                                for (peer, addr) in list {
-                                    self
-                                        .behaviour_mut()
-                                        .protocol
-                                        .add_node_to_partial_view(peer);
-                                    tracing::info!("Added peer to bucket: {peer} at {addr}");
-                                }
-                            }
-                            mdns::Event::Expired(list) => {
-                                for (peer, addr) in list {
-                                    if !self.behaviour().mdns.has_node(&peer) {
-                                        self.behaviour_mut().protocol.remove_node_from_partial_view(&peer);
-                                        tracing::info!("Removed peer from bucket: {peer} at {addr}");
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
+                event = self.select_next_some() => match event {
+                    SwarmEvent::NewListenAddr { address, .. } => {
+                        tracing::info!("Listening on {address:?}");
                     }
+                    SwarmEvent::Behaviour(ControllerEvent::Gossipsub(GossipsubEvent::Message { propagation_source, message_id, message })) => {
+                        let peer_id = propagation_source;
+                        let message_data = String::from_utf8_lossy(&message.data);
+                        tracing::info!("Message received:\n[{peer_id}] said: \"{message_data}\" -  (message ID: {message_id})");
+                    }
+                    SwarmEvent::Behaviour(ControllerEvent::Mdns(event)) => match event {
+                        mdns::Event::Discovered(list) => {
+                            for (peer, multiaddr) in list {
+                                self
+                                    .behaviour_mut()
+                                    .gossipsub
+                                    .add_explicit_peer(&peer);
+                                tracing::info!("mDNS discovered new peer: {peer} at {multiaddr}");
+                            }
+                        }
+                        mdns::Event::Expired(list) => {
+                            for (peer, multiaddr) in list {
+                                if !self.behaviour().mdns.has_node(&peer) {
+                                    self.behaviour_mut().gossipsub.remove_explicit_peer(&peer);
+                                    tracing::info!("mDNS peer discovery expired for: {peer} at {multiaddr}");
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -230,13 +253,21 @@ pub async fn bootstrap() -> Result<(), Report> {
         .multiplex(mplex::MplexConfig::new())
         .boxed();
 
-    let pubsub_topic = floodsub::Topic::new(PUBSUB_TOPIC);
+    let pubsub_topic = IdentTopic::new(PUBSUB_TOPIC);
 
     let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default())?;
-    let mut behaviour = ControllerBehaviour::new(&node, mdns_behaviour);
-    behaviour.protocol.subscribe(pubsub_topic.clone());
+    let behaviour = ControllerBehaviour::new(&node, mdns_behaviour)?;
 
     let mut controller = Controller::new(transport, behaviour, node);
+    match controller
+        .swarm
+        .behaviour_mut()
+        .gossipsub
+        .subscribe(&pubsub_topic)
+    {
+        Ok(_true) => tracing::info!("Subscribed to new topic: {pubsub_topic}"),
+        Err(err) => tracing::error!("Subscription to topic {pubsub_topic} failed: {err:?}"),
+    }
 
     // Reach out to another node if specified
     if let Some(ref to_dial) = std::env::args().nth(1) {
